@@ -2,6 +2,7 @@
 import os, sys, json, random, shutil, time, warnings
 from copy import deepcopy
 from pathlib import Path
+from IPython.display import display
 
 IN_COLAB = "google.colab" in sys.modules
 IN_KAGGLE = bool(os.environ.get("KAGGLE_KERNEL_RUN_TYPE")) or Path("/kaggle/working").exists()
