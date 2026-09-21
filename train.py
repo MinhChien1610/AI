@@ -61,16 +61,32 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 if MANUAL_DATA_ROOT:
     RAW_ROOT = Path(MANUAL_DATA_ROOT).expanduser().resolve()
 else:
-    import kagglehub
-    try:
-        if IN_COLAB:
-            from google.colab import userdata
-            token = userdata.get("KAGGLE_API_TOKEN")
-            if token:
-                os.environ["KAGGLE_API_TOKEN"] = token
-    except Exception:
-        pass
-    RAW_ROOT = Path(kagglehub.dataset_download(DATASET_SLUG)).resolve()
+    dataset_name = DATASET_SLUG.split("/")[-1]
+    kaggle_input_dir = Path(f"/kaggle/input/{dataset_name}")
+    
+    if IN_KAGGLE and kaggle_input_dir.exists():
+        RAW_ROOT = kaggle_input_dir.resolve()
+    else:
+        import kagglehub
+        try:
+            if IN_COLAB:
+                from google.colab import userdata
+                token = userdata.get("KAGGLE_API_TOKEN")
+                if token:
+                    os.environ["KAGGLE_API_TOKEN"] = token
+        except Exception:
+            pass
+            
+        try:
+            RAW_ROOT = Path(kagglehub.dataset_download(DATASET_SLUG)).resolve()
+        except Exception as e:
+            if IN_KAGGLE:
+                raise RuntimeError(
+                    f"Kagglehub lỗi: {e}\n\n"
+                    f"-> TRÊN KAGGLE: Bạn phải ấn nút 'Add Data' (hoặc 'Add Input') ở thanh bên phải, "
+                    f"tìm dataset '{DATASET_SLUG}' và thêm vào notebook trước khi chạy (đặc biệt khi Save & Run All)."
+                ) from e
+            raise
 
 def find_split(root, aliases):
     aliases = {x.lower() for x in aliases}
