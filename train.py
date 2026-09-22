@@ -62,28 +62,24 @@ VAL_RATIO_IF_MISSING = 0.18
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 def find_attached_kaggle_dataset():
-    """Tìm D-Fire đã được Add Input; không gọi API attach trong background job."""
+    """
+    Path đã xác nhận trực tiếp trên Kaggle:
+    /kaggle/input/datasets/sayedgama199/smoke-fire-detection-yolo
+    """
+    exact = Path("/kaggle/input/datasets/sayedgama199/smoke-fire-detection-yolo")
+    if exact.exists():
+        return exact.resolve()
+
+    # Fallback nhẹ, không quét rglob toàn bộ dataset.
     input_root = Path("/kaggle/input")
     if not input_root.exists():
         return None
 
-    preferred = input_root / DATASET_SLUG.split("/")[-1]
-    if preferred.exists():
-        return preferred.resolve()
-
-    for candidate in sorted(p for p in input_root.iterdir() if p.is_dir()):
-        image_dirs = list(candidate.rglob("images"))
-        has_train = any(
-            d.is_dir() and d.parent.name.lower() in {"train", "training"}
-            and (d.parent / "labels").is_dir()
-            for d in image_dirs
-        )
-        has_test = any(
-            d.is_dir() and d.parent.name.lower() in {"test", "testing"}
-            and (d.parent / "labels").is_dir()
-            for d in image_dirs
-        )
-        if has_train and has_test:
+    for candidate in [
+        input_root / "smoke-fire-detection-yolo",
+        input_root / "datasets" / "sayedgama199" / "smoke-fire-detection-yolo",
+    ]:
+        if candidate.exists():
             return candidate.resolve()
     return None
 
@@ -99,8 +95,9 @@ elif IN_KAGGLE:
             if Path("/kaggle/input").exists() else []
         )
         raise RuntimeError(
-            "Không tìm thấy D-Fire trong /kaggle/input.\n"
-            "Hãy Add Input dataset D-Fire vào notebook TRƯỚC khi Save Version / Save & Run All.\n"
+            "Không tìm thấy D-Fire đã Add Input.\n"
+            "Path mong đợi: /kaggle/input/datasets/sayedgama199/smoke-fire-detection-yolo\n"
+            "Hãy Add Input Smoke-Fire-Detection-YOLO trước khi Save Version / Run All.\n"
             f"Input hiện thấy: {attached}"
         )
     print("Kaggle attached dataset:", RAW_ROOT)
