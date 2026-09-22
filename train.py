@@ -8,7 +8,9 @@ IN_COLAB = "google.colab" in sys.modules
 IN_KAGGLE = bool(os.environ.get("KAGGLE_KERNEL_RUN_TYPE")) or Path("/kaggle/working").exists()
 WORKDIR = Path("/content/dfire_buoi4" if IN_COLAB else "/kaggle/working/dfire_buoi4" if IN_KAGGLE else "./dfire_buoi4_work").resolve()
 WORKDIR.mkdir(parents=True, exist_ok=True)
-os.environ["YOLO_CONFIG_DIR"] = str(WORKDIR / "yolo_config")
+YOLO_CONFIG_DIR = WORKDIR / "yolo_config"
+YOLO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ["YOLO_CONFIG_DIR"] = str(YOLO_CONFIG_DIR)
 
 RUN_MODE = "full"  # @param ["smoke_test", "demo", "full"]
 RUN_TRAIN = True  # @param {type:"boolean"}
@@ -63,24 +65,47 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 def find_attached_kaggle_dataset():
     """
-    Path đã xác nhận trực tiếp trên Kaggle:
-    /kaggle/input/datasets/sayedgama199/smoke-fire-detection-yolo
+    Tìm D-Fire theo CẤU TRÚC dataset đã mount, không phụ thuộc owner/path hiển thị của Kaggle.
+    Chỉ duyệt tên thư mục; không đọc nội dung ảnh nên không tải/quét 4 GB dữ liệu ảnh.
+    Dataset hợp lệ phải có data/train/images + labels và data/test/images + labels.
     """
-    exact = Path("/kaggle/input/datasets/sayedgama199/smoke-fire-detection-yolo")
-    if exact.exists():
-        return exact.resolve()
-
-    # Fallback nhẹ, không quét rglob toàn bộ dataset.
     input_root = Path("/kaggle/input")
     if not input_root.exists():
         return None
 
-    for candidate in [
-        input_root / "smoke-fire-detection-yolo",
+    # Các path đã quan sát trên Kaggle của project này.
+    preferred = [
         input_root / "datasets" / "sayedgama199" / "smoke-fire-detection-yolo",
-    ]:
-        if candidate.exists():
-            return candidate.resolve()
+        input_root / "smoke-fire-detection-yolo",
+    ]
+    for root in preferred:
+        if (
+            (root / "data" / "train" / "images").is_dir()
+            and (root / "data" / "train" / "labels").is_dir()
+            and (root / "data" / "test" / "images").is_dir()
+            and (root / "data" / "test" / "labels").is_dir()
+        ):
+            return root.resolve()
+
+    # Fallback: tìm thư mục "data" có đúng cấu trúc D-Fire.
+    # os.walk chỉ duyệt metadata thư mục và dừng đi sâu khi đã gặp candidate.
+    for current, dirs, _files in os.walk(input_root):
+        current_path = Path(current)
+        if current_path.name == "data":
+            train = current_path / "train"
+            test = current_path / "test"
+            if (
+                (train / "images").is_dir()
+                and (train / "labels").is_dir()
+                and (test / "images").is_dir()
+                and (test / "labels").is_dir()
+            ):
+                return current_path.parent.resolve()
+
+        # Không cần đi vào hàng nghìn file ảnh/label.
+        if current_path.name in {"images", "labels"}:
+            dirs[:] = []
+
     return None
 
 if MANUAL_DATA_ROOT:
@@ -90,15 +115,20 @@ elif IN_KAGGLE:
     # Save & Run All là non-interactive: chỉ đọc dataset đã mount ở /kaggle/input.
     RAW_ROOT = find_attached_kaggle_dataset()
     if RAW_ROOT is None:
-        attached = (
-            [p.name for p in Path("/kaggle/input").iterdir()]
-            if Path("/kaggle/input").exists() else []
-        )
+        visible_dirs = []
+        input_root = Path("/kaggle/input")
+        if input_root.exists():
+            for current, dirs, _files in os.walk(input_root):
+                rel = Path(current).relative_to(input_root)
+                if len(rel.parts) <= 4:
+                    visible_dirs.append(str(Path("/kaggle/input") / rel))
+                if Path(current).name in {"images", "labels"}:
+                    dirs[:] = []
+                if len(visible_dirs) >= 80:
+                    break
         raise RuntimeError(
-            "Không tìm thấy D-Fire đã Add Input.\n"
-            "Path mong đợi: /kaggle/input/datasets/sayedgama199/smoke-fire-detection-yolo\n"
-            "Hãy Add Input Smoke-Fire-Detection-YOLO trước khi Save Version / Run All.\n"
-            f"Input hiện thấy: {attached}"
+            "Không tìm thấy D-Fire đã Add Input theo cấu trúc train/test images+labels.\n"
+            "Các thư mục Kaggle nhìn thấy:\n- " + "\n- ".join(visible_dirs)
         )
     print("Kaggle attached dataset:", RAW_ROOT)
 
