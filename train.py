@@ -13,7 +13,10 @@ os.environ["YOLO_CONFIG_DIR"] = str(WORKDIR / "yolo_config")
 RUN_MODE = "full"  # @param ["smoke_test", "demo", "full"]
 RUN_TRAIN = True  # @param {type:"boolean"}
 RUN_COCO_SIZE_EVAL = True  # @param {type:"boolean"}
-EXPERIMENTS_TO_RUN = ["baseline", "multiscale", "attention", "combined"]
+# Kaggle background: 1 Version = 1 experiment để mỗi phần hoàn tất sẽ được lưu thành Output riêng.
+# Đổi lần lượt: "baseline" -> "multiscale" -> "attention" -> "combined"
+KAGGLE_EXPERIMENT = "baseline"  # @param ["baseline", "multiscale", "attention", "combined"]
+EXPERIMENTS_TO_RUN = [KAGGLE_EXPERIMENT]
 SEEDS = [42]
 IMGSZ = 640
 BATCH = 16
@@ -53,40 +56,68 @@ print({"platform": platform_name, "torch": torch.__version__, "ultralytics": ult
        "gpu": torch.cuda.get_device_name(0) if DEVICE != "cpu" else None,
        "device": str(DEVICE), "mode": RUN_MODE, **CFG})
 
-DATASET_SLUG = "sayedgamal99/smoke-fire-detection-yolo"
+DATASET_SLUG = "sayedgama199/smoke-fire-detection-yolo"
 MANUAL_DATA_ROOT = ""  # @param {type:"string"}
 VAL_RATIO_IF_MISSING = 0.18
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
+def find_attached_kaggle_dataset():
+    """Tìm D-Fire đã được Add Input; không gọi API attach trong background job."""
+    input_root = Path("/kaggle/input")
+    if not input_root.exists():
+        return None
+
+    preferred = input_root / DATASET_SLUG.split("/")[-1]
+    if preferred.exists():
+        return preferred.resolve()
+
+    for candidate in sorted(p for p in input_root.iterdir() if p.is_dir()):
+        image_dirs = list(candidate.rglob("images"))
+        has_train = any(
+            d.is_dir() and d.parent.name.lower() in {"train", "training"}
+            and (d.parent / "labels").is_dir()
+            for d in image_dirs
+        )
+        has_test = any(
+            d.is_dir() and d.parent.name.lower() in {"test", "testing"}
+            and (d.parent / "labels").is_dir()
+            for d in image_dirs
+        )
+        if has_train and has_test:
+            return candidate.resolve()
+    return None
+
 if MANUAL_DATA_ROOT:
     RAW_ROOT = Path(MANUAL_DATA_ROOT).expanduser().resolve()
+
+elif IN_KAGGLE:
+    # Save & Run All là non-interactive: chỉ đọc dataset đã mount ở /kaggle/input.
+    RAW_ROOT = find_attached_kaggle_dataset()
+    if RAW_ROOT is None:
+        attached = (
+            [p.name for p in Path("/kaggle/input").iterdir()]
+            if Path("/kaggle/input").exists() else []
+        )
+        raise RuntimeError(
+            "Không tìm thấy D-Fire trong /kaggle/input.\n"
+            "Hãy Add Input dataset D-Fire vào notebook TRƯỚC khi Save Version / Save & Run All.\n"
+            f"Input hiện thấy: {attached}"
+        )
+    print("Kaggle attached dataset:", RAW_ROOT)
+
 else:
-    dataset_name = DATASET_SLUG.split("/")[-1]
-    kaggle_input_dir = Path(f"/kaggle/input/{dataset_name}")
-    
-    if IN_KAGGLE and kaggle_input_dir.exists():
-        RAW_ROOT = kaggle_input_dir.resolve()
-    else:
-        import kagglehub
-        try:
-            if IN_COLAB:
-                from google.colab import userdata
-                token = userdata.get("KAGGLE_API_TOKEN")
-                if token:
-                    os.environ["KAGGLE_API_TOKEN"] = token
-        except Exception:
-            pass
-            
-        try:
-            RAW_ROOT = Path(kagglehub.dataset_download(DATASET_SLUG)).resolve()
-        except Exception as e:
-            if IN_KAGGLE:
-                raise RuntimeError(
-                    f"Kagglehub lỗi: {e}\n\n"
-                    f"-> TRÊN KAGGLE: Bạn phải ấn nút 'Add Data' (hoặc 'Add Input') ở thanh bên phải, "
-                    f"tìm dataset '{DATASET_SLUG}' và thêm vào notebook trước khi chạy (đặc biệt khi Save & Run All)."
-                ) from e
-            raise
+    # Colab/local vẫn có thể tải bằng kagglehub như trước.
+    import kagglehub
+    try:
+        if IN_COLAB:
+            from google.colab import userdata
+            token = userdata.get("KAGGLE_API_TOKEN")
+            if token:
+                os.environ["KAGGLE_API_TOKEN"] = token
+    except Exception:
+        pass
+
+    RAW_ROOT = Path(kagglehub.dataset_download(DATASET_SLUG)).resolve()
 
 def find_split(root, aliases):
     aliases = {x.lower() for x in aliases}
@@ -380,6 +411,7 @@ if RUN_TRAIN:
         for seed in SEEDS:
             run_name = f"{experiment}_{RUN_MODE}_seed{seed}"
             best_path = RUNS_DIR / run_name / "weights" / "best.pt"
+            last_path = RUNS_DIR / run_name / "weights" / "last.pt"
             started = time.time()
             if not best_path.exists():
                 model = YOLO(str(EXPERIMENTS[experiment]["yaml"]))
@@ -389,235 +421,349 @@ if RUN_TRAIN:
             if not best_path.exists():
                 raise FileNotFoundError(f"Thiếu checkpoint: {best_path}")
             run_manifest.append({"experiment": experiment, "seed": seed,
-                                 "weights": str(best_path), "train_minutes_this_session": (time.time()-started)/60})
+                                 "weights": str(best_path),
+                                 "last_weights": str(last_path) if last_path.exists() else "",
+                                 "train_minutes_this_session": (time.time()-started)/60})
 else:
     for experiment in EXPERIMENTS_TO_RUN:
         for seed in SEEDS:
-            best_path = RUNS_DIR / f"{experiment}_{RUN_MODE}_seed{seed}" / "weights" / "best.pt"
+            run_name = f"{experiment}_{RUN_MODE}_seed{seed}"
+            best_path = RUNS_DIR / run_name / "weights" / "best.pt"
+            last_path = RUNS_DIR / run_name / "weights" / "last.pt"
             if best_path.exists():
                 run_manifest.append({"experiment": experiment, "seed": seed,
-                                     "weights": str(best_path), "train_minutes_this_session": 0.0})
+                                     "weights": str(best_path),
+                                     "last_weights": str(last_path) if last_path.exists() else "",
+                                     "train_minutes_this_session": 0.0})
 
 manifest_df = pd.DataFrame(run_manifest)
 if manifest_df.empty:
     raise RuntimeError("Không có checkpoint. Bật RUN_TRAIN hoặc chép weights vào đúng thư mục runs.")
 display(manifest_df)
 
-eval_rows, class_rows, val_dirs = [], [], {}
-for row in run_manifest:
-    experiment, seed = row["experiment"], row["seed"]
-    model = YOLO(row["weights"])
-    metrics = model.val(data=str(data_yaml), split="test", imgsz=IMGSZ, batch=BATCH,
-                        device=DEVICE, workers=WORKERS, conf=0.001, iou=0.7, max_det=300,
-                        plots=True, project=str(RUNS_DIR / "test_eval"),
-                        name=f"{experiment}_{RUN_MODE}_seed{seed}", exist_ok=True, verbose=False)
-    params = sum(p.numel() for p in model.model.parameters())
-    val_dirs[(experiment, seed)] = Path(metrics.save_dir)
-    eval_rows.append({
-        "experiment": experiment, "seed": seed, "precision": metrics.box.mp,
-        "recall": metrics.box.mr, "mAP50": metrics.box.map50,
-        "mAP75": metrics.box.map75, "mAP50_95": metrics.box.map,
-        "inference_ms": metrics.speed.get("inference", np.nan),
-        "params_M": params / 1e6, "GFLOPs": get_flops(model.model, imgsz=IMGSZ),
-    })
-    for cls_id, cls_map in enumerate(metrics.box.maps):
-        class_rows.append({"experiment": experiment, "seed": seed,
-                           "class": CLASS_NAMES[cls_id], "mAP50_95": cls_map})
-    del model
-    if torch.cuda.is_available(): torch.cuda.empty_cache()
+# ===== SAFETY EXPORT NGAY SAU KHI TRAIN XONG =====
+# Mục tiêu: nếu phần evaluation/report phía sau có lỗi, best.pt + last.pt +
+# log/plot training vẫn đã được đóng gói trong /kaggle/working.
+current_experiment = EXPERIMENTS_TO_RUN[0]
+current_row = run_manifest[0]
+run_name = f"{current_experiment}_{RUN_MODE}_seed{current_row['seed']}"
+run_dir = RUNS_DIR / run_name
 
-eval_df = pd.DataFrame(eval_rows)
-class_df = pd.DataFrame(class_rows)
-display(eval_df.sort_values("mAP50_95", ascending=False).style.format(precision=4))
-display(class_df.pivot_table(index=["experiment", "seed"], columns="class", values="mAP50_95").style.format(precision=4))
+SAFETY_DIR = WORKDIR / "completed" / current_experiment
+SAFETY_DIR.mkdir(parents=True, exist_ok=True)
 
-import contextlib, io
-from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
+best_src = Path(current_row["weights"])
+shutil.copy2(best_src, SAFETY_DIR / f"{current_experiment}_best.pt")
 
-def build_coco_ground_truth(paths):
-    dataset = {"info": {}, "licenses": [], "images": [], "annotations": [],
-               "categories": [{"id": i+1, "name": name} for i, name in CLASS_NAMES.items()]}
-    path_to_id, ann_id = {}, 1
-    for image_id, path in enumerate(paths, 1):
-        with Image.open(path) as im: W, H = im.size
-        path_to_id[str(path.resolve())] = image_id
-        dataset["images"].append({"id": image_id, "file_name": str(path), "width": W, "height": H})
-        for cls, x, y, w, h in read_labels(path):
-            bw, bh = w*W, h*H
-            dataset["annotations"].append({"id": ann_id, "image_id": image_id,
-                "category_id": cls+1, "bbox": [(x-w/2)*W, (y-h/2)*H, bw, bh],
-                "area": bw*bh, "iscrowd": 0})
-            ann_id += 1
-    coco = COCO()
-    coco.dataset = dataset
-    with contextlib.redirect_stdout(io.StringIO()): coco.createIndex()
-    return coco, path_to_id
+last_src_text = current_row.get("last_weights", "")
+if last_src_text and Path(last_src_text).exists():
+    shutil.copy2(Path(last_src_text), SAFETY_DIR / f"{current_experiment}_last.pt")
 
-def predict_coco(model, paths, path_to_id):
-    predictions = []
+# Giữ các file quan trọng do Ultralytics sinh ra sau training.
+for filename in [
+    "args.yaml", "results.csv", "results.png",
+    "confusion_matrix.png", "confusion_matrix_normalized.png",
+    "BoxPR_curve.png", "BoxP_curve.png", "BoxR_curve.png", "BoxF1_curve.png",
+]:
+    p = run_dir / filename
+    if p.exists():
+        shutil.copy2(p, SAFETY_DIR / filename)
 
-    CHUNK_SIZE = 128
+manifest_df.to_csv(SAFETY_DIR / "run_manifest.csv", index=False)
 
-    for start in range(0, len(paths), CHUNK_SIZE):
-        chunk_paths = paths[start:start + CHUNK_SIZE]
+safety_archive = shutil.make_archive(
+    str(WORKDIR / f"{current_experiment}_{RUN_MODE}_TRAIN_COMPLETE"),
+    "zip",
+    root_dir=SAFETY_DIR.parent,
+    base_dir=SAFETY_DIR.name,
+)
 
-        stream = model.predict(
-            source=[str(p) for p in chunk_paths],
-            stream=True,
-            imgsz=IMGSZ,
-            batch=BATCH,
-            device=DEVICE,
-            conf=0.001,
-            iou=0.7,
-            max_det=300,
-            verbose=False
-        )
+print("\n" + "=" * 70)
+print("TRAIN ĐÃ XONG VÀ ĐÃ ĐÓNG GÓI AN TOÀN:", current_experiment)
+print("Safety ZIP:", safety_archive)
+print("Từ thời điểm này, lỗi evaluation phía sau sẽ KHÔNG làm mất checkpoint train.")
+print("=" * 70)
 
-        for result in stream:
-            image_id = path_to_id[str(Path(result.path).resolve())]
-
-            if result.boxes is None:
-                continue
-
-            for xyxy, score, cls in zip(
-                result.boxes.xyxy.cpu().numpy(),
-                result.boxes.conf.cpu().numpy(),
-                result.boxes.cls.cpu().numpy()
-            ):
-                x1, y1, x2, y2 = xyxy.tolist()
-
-                predictions.append({
-                    "image_id": image_id,
-                    "category_id": int(cls) + 1,
-                    "bbox": [x1, y1, x2-x1, y2-y1],
-                    "score": float(score)
-                })
-
-        del stream
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    return predictions
-
-def coco_metrics(coco_gt, predictions, cat_ids=None):
-    if not predictions:
-        return {k: 0.0 for k in ["AP", "AP50", "AP75", "AP_small", "AP_medium", "AP_large", "AR100"]}
-    with contextlib.redirect_stdout(io.StringIO()):
-        coco_dt = coco_gt.loadRes(predictions)
-        evaluator = COCOeval(coco_gt, coco_dt, "bbox")
-        if cat_ids is not None: evaluator.params.catIds = cat_ids
-        evaluator.evaluate(); evaluator.accumulate(); evaluator.summarize()
-    s = evaluator.stats
-    return dict(AP=s[0], AP50=s[1], AP75=s[2], AP_small=s[3], AP_medium=s[4], AP_large=s[5], AR100=s[8])
-
-size_rows = []
-if RUN_COCO_SIZE_EVAL:
-    coco_gt, path_to_id = build_coco_ground_truth(test_paths)
-    pred_dir = WORKDIR / "coco_predictions"
-    pred_dir.mkdir(exist_ok=True)
+def run_evaluation_and_final_export():
+    eval_rows, class_rows, val_dirs = [], [], {}
     for row in run_manifest:
         experiment, seed = row["experiment"], row["seed"]
-        pred_file = pred_dir / f"{experiment}_{RUN_MODE}_seed{seed}.json"
-        if pred_file.exists():
-            predictions = json.loads(pred_file.read_text(encoding="utf-8"))
-        else:
-            predictions = predict_coco(YOLO(row["weights"]), test_paths, path_to_id)
-            pred_file.write_text(json.dumps(predictions), encoding="utf-8")
-        size_rows.append({"experiment": experiment, "seed": seed, "class": "all",
-                          **coco_metrics(coco_gt, predictions)})
-        for cls_id, cls_name in CLASS_NAMES.items():
-            size_rows.append({"experiment": experiment, "seed": seed, "class": cls_name,
-                              **coco_metrics(coco_gt, predictions, [cls_id+1])})
-size_df = pd.DataFrame(size_rows)
-if not size_df.empty:
-    display(size_df.query("`class` == 'all'").sort_values("AP", ascending=False).style.format(precision=4))
+        model = YOLO(row["weights"])
+        metrics = model.val(data=str(data_yaml), split="test", imgsz=IMGSZ, batch=BATCH,
+                            device=DEVICE, workers=WORKERS, conf=0.001, iou=0.7, max_det=300,
+                            plots=True, project=str(RUNS_DIR / "test_eval"),
+                            name=f"{experiment}_{RUN_MODE}_seed{seed}", exist_ok=True, verbose=False)
+        params = sum(p.numel() for p in model.model.parameters())
+        val_dirs[(experiment, seed)] = Path(metrics.save_dir)
+        eval_rows.append({
+            "experiment": experiment, "seed": seed, "precision": metrics.box.mp,
+            "recall": metrics.box.mr, "mAP50": metrics.box.map50,
+            "mAP75": metrics.box.map75, "mAP50_95": metrics.box.map,
+            "inference_ms": metrics.speed.get("inference", np.nan),
+            "params_M": params / 1e6, "GFLOPs": get_flops(model.model, imgsz=IMGSZ),
+        })
+        for cls_id, cls_map in enumerate(metrics.box.maps):
+            class_rows.append({"experiment": experiment, "seed": seed,
+                               "class": CLASS_NAMES[cls_id], "mAP50_95": cls_map})
+        del model
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-order = ["baseline", "multiscale", "attention", "combined"]
-summary = eval_df.groupby("experiment", as_index=False).agg(
-    mAP50_95=("mAP50_95", "mean"), mAP50=("mAP50", "mean"),
-    precision=("precision", "mean"), recall=("recall", "mean"),
-    inference_ms=("inference_ms", "mean"), params_M=("params_M", "mean"), GFLOPs=("GFLOPs", "mean"))
-if not size_df.empty:
-    size_summary = size_df.query("`class` == 'all'").groupby("experiment", as_index=False)[["AP_small", "AP_medium", "AP_large"]].mean()
-    summary = summary.merge(size_summary, on="experiment", how="left")
-summary["experiment"] = pd.Categorical(summary["experiment"], order, ordered=True)
-summary = summary.sort_values("experiment").reset_index(drop=True)
-base = summary.loc[summary["experiment"] == "baseline", "mAP50_95"]
-summary["delta_mAP50_95"] = summary["mAP50_95"] - (base.iloc[0] if len(base) else np.nan)
-display(summary.style.format(precision=4))
+    eval_df = pd.DataFrame(eval_rows)
+    class_df = pd.DataFrame(class_rows)
+    display(eval_df.sort_values("mAP50_95", ascending=False).style.format(precision=4))
+    display(class_df.pivot_table(index=["experiment", "seed"], columns="class", values="mAP50_95").style.format(precision=4))
 
-metric_candidates = [c for c in ["mAP50_95", "mAP50", "AP_small"] if c in summary and summary[c].notna().any()]
-lookup = summary.set_index("experiment")
-effects = []
-if set(order).issubset(set(lookup.index.astype(str))):
-    for metric in metric_candidates:
-        b, m, a, c = [float(lookup.loc[x, metric]) for x in order]
-        effects.append({"metric": metric, "P2 effect": m-b, "PSA effect": a-b,
-                        "combined effect": c-b, "interaction": c-m-a+b})
-effects_df = pd.DataFrame(effects)
-display(effects_df.style.format(precision=4))
+    import contextlib, io
+    from pycocotools.coco import COCO
+    from pycocotools.cocoeval import COCOeval
 
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-sns.barplot(data=summary, x="experiment", y="mAP50_95", ax=axes[0])
-if "AP_small" in summary: sns.barplot(data=summary, x="experiment", y="AP_small", ax=axes[1])
-sns.barplot(data=summary, x="experiment", y="inference_ms", ax=axes[2])
-axes[0].set_title("mAP50-95"); axes[1].set_title("COCO AP small"); axes[2].set_title("Inference ms/ảnh")
-for ax in axes: ax.tick_params(axis="x", rotation=20)
-plt.tight_layout(); plt.show()
+    def build_coco_ground_truth(paths):
+        dataset = {"info": {}, "licenses": [], "images": [], "annotations": [],
+                   "categories": [{"id": i+1, "name": name} for i, name in CLASS_NAMES.items()]}
+        path_to_id, ann_id = {}, 1
+        for image_id, path in enumerate(paths, 1):
+            with Image.open(path) as im: W, H = im.size
+            path_to_id[str(path.resolve())] = image_id
+            dataset["images"].append({"id": image_id, "file_name": str(path), "width": W, "height": H})
+            for cls, x, y, w, h in read_labels(path):
+                bw, bh = w*W, h*H
+                dataset["annotations"].append({"id": ann_id, "image_id": image_id,
+                    "category_id": cls+1, "bbox": [(x-w/2)*W, (y-h/2)*H, bw, bh],
+                    "area": bw*bh, "iscrowd": 0})
+                ann_id += 1
+        coco = COCO()
+        coco.dataset = dataset
+        with contextlib.redirect_stdout(io.StringIO()): coco.createIndex()
+        return coco, path_to_id
 
-best_experiment = str(summary.sort_values("mAP50_95", ascending=False).iloc[0]["experiment"])
-best_row = next(r for r in run_manifest if r["experiment"] == best_experiment)
-best_model = YOLO(best_row["weights"])
+    def predict_coco(model, paths, path_to_id):
+        predictions = []
 
-hard_pool = boxes.query("split == 'test' and (size_at_640 == 'small' or `class` == 'smoke')")["image"].drop_duplicates().tolist()
-hard_samples = random.Random(SEEDS[0]).sample(hard_pool, min(9, len(hard_pool)))
-predictions = best_model.predict(hard_samples, imgsz=IMGSZ, conf=0.25, iou=0.7, device=DEVICE, verbose=False)
-fig, axes = plt.subplots(3, 3, figsize=(15, 15))
-for ax, result in zip(axes.flat, predictions):
-    ax.imshow(result.plot()[:, :, ::-1]); ax.axis("off"); ax.set_title(Path(result.path).name)
-for ax in axes.flat[len(predictions):]: ax.axis("off")
-plt.suptitle(f"Best: {best_experiment}"); plt.tight_layout(); plt.show()
+        CHUNK_SIZE = 128
 
-plot_names = ["confusion_matrix_normalized.png", "BoxPR_curve.png", "BoxF1_curve.png"]
-plot_dir = val_dirs[(best_experiment, best_row["seed"])]
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-for ax, name in zip(axes, plot_names):
-    path = plot_dir / name
-    if path.exists(): ax.imshow(Image.open(path))
-    ax.axis("off"); ax.set_title(name)
-plt.tight_layout(); plt.show()
+        for start in range(0, len(paths), CHUNK_SIZE):
+            chunk_paths = paths[start:start + CHUNK_SIZE]
 
-SAVE_TO_DRIVE = False  # @param {type:"boolean"}
-DOWNLOAD_ZIP = False  # @param {type:"boolean"}
+            stream = model.predict(
+                source=[str(p) for p in chunk_paths],
+                stream=True,
+                imgsz=IMGSZ,
+                batch=BATCH,
+                device=DEVICE,
+                conf=0.001,
+                iou=0.7,
+                max_det=300,
+                verbose=False
+            )
 
-REPORT_DIR = WORKDIR / "report"
-REPORT_DIR.mkdir(exist_ok=True)
-architecture_df.to_csv(REPORT_DIR / "architectures.csv", index=False)
-manifest_df.to_csv(REPORT_DIR / "run_manifest.csv", index=False)
-eval_df.to_csv(REPORT_DIR / "test_metrics.csv", index=False)
-class_df.to_csv(REPORT_DIR / "per_class_metrics.csv", index=False)
-summary.to_csv(REPORT_DIR / "ablation_summary.csv", index=False)
-effects_df.to_csv(REPORT_DIR / "factorial_effects.csv", index=False)
-if not size_df.empty: size_df.to_csv(REPORT_DIR / "coco_size_metrics.csv", index=False)
+            for result in stream:
+                image_id = path_to_id[str(Path(result.path).resolve())]
 
-best_copy = REPORT_DIR / f"best_{best_experiment}.pt"
-shutil.copy2(best_row["weights"], best_copy)
-archive = shutil.make_archive(str(WORKDIR / "dfire_buoi4_results"), "zip", root_dir=WORKDIR,
-                              base_dir="report")
-print("Báo cáo:", REPORT_DIR)
-print("Checkpoint tốt nhất:", best_copy)
-print("ZIP:", archive)
+                if result.boxes is None:
+                    continue
 
-if IN_COLAB and SAVE_TO_DRIVE:
-    from google.colab import drive
-    drive.mount("/content/drive")
-    target = Path("/content/drive/MyDrive/DFire_Buoi4")
-    target.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(archive, target / Path(archive).name)
-    shutil.copy2(best_copy, target / best_copy.name)
-if IN_COLAB and DOWNLOAD_ZIP:
-    from google.colab import files
-    files.download(archive)
+                for xyxy, score, cls in zip(
+                    result.boxes.xyxy.cpu().numpy(),
+                    result.boxes.conf.cpu().numpy(),
+                    result.boxes.cls.cpu().numpy()
+                ):
+                    x1, y1, x2, y2 = xyxy.tolist()
 
+                    predictions.append({
+                        "image_id": image_id,
+                        "category_id": int(cls) + 1,
+                        "bbox": [x1, y1, x2-x1, y2-y1],
+                        "score": float(score)
+                    })
+
+            del stream
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        return predictions
+
+    def coco_metrics(coco_gt, predictions, cat_ids=None):
+        if not predictions:
+            return {k: 0.0 for k in ["AP", "AP50", "AP75", "AP_small", "AP_medium", "AP_large", "AR100"]}
+        with contextlib.redirect_stdout(io.StringIO()):
+            coco_dt = coco_gt.loadRes(predictions)
+            evaluator = COCOeval(coco_gt, coco_dt, "bbox")
+            if cat_ids is not None: evaluator.params.catIds = cat_ids
+            evaluator.evaluate(); evaluator.accumulate(); evaluator.summarize()
+        s = evaluator.stats
+        return dict(AP=s[0], AP50=s[1], AP75=s[2], AP_small=s[3], AP_medium=s[4], AP_large=s[5], AR100=s[8])
+
+    size_rows = []
+    if RUN_COCO_SIZE_EVAL:
+        coco_gt, path_to_id = build_coco_ground_truth(test_paths)
+        pred_dir = WORKDIR / "coco_predictions"
+        pred_dir.mkdir(exist_ok=True)
+        for row in run_manifest:
+            experiment, seed = row["experiment"], row["seed"]
+            pred_file = pred_dir / f"{experiment}_{RUN_MODE}_seed{seed}.json"
+            if pred_file.exists():
+                predictions = json.loads(pred_file.read_text(encoding="utf-8"))
+            else:
+                predictions = predict_coco(YOLO(row["weights"]), test_paths, path_to_id)
+                pred_file.write_text(json.dumps(predictions), encoding="utf-8")
+            size_rows.append({"experiment": experiment, "seed": seed, "class": "all",
+                              **coco_metrics(coco_gt, predictions)})
+            for cls_id, cls_name in CLASS_NAMES.items():
+                size_rows.append({"experiment": experiment, "seed": seed, "class": cls_name,
+                                  **coco_metrics(coco_gt, predictions, [cls_id+1])})
+    size_df = pd.DataFrame(size_rows)
+    if not size_df.empty:
+        display(size_df.query("`class` == 'all'").sort_values("AP", ascending=False).style.format(precision=4))
+
+    order = ["baseline", "multiscale", "attention", "combined"]
+    summary = eval_df.groupby("experiment", as_index=False).agg(
+        mAP50_95=("mAP50_95", "mean"), mAP50=("mAP50", "mean"),
+        precision=("precision", "mean"), recall=("recall", "mean"),
+        inference_ms=("inference_ms", "mean"), params_M=("params_M", "mean"), GFLOPs=("GFLOPs", "mean"))
+    if not size_df.empty:
+        size_summary = size_df.query("`class` == 'all'").groupby("experiment", as_index=False)[["AP_small", "AP_medium", "AP_large"]].mean()
+        summary = summary.merge(size_summary, on="experiment", how="left")
+    summary["experiment"] = pd.Categorical(summary["experiment"], order, ordered=True)
+    summary = summary.sort_values("experiment").reset_index(drop=True)
+    base = summary.loc[summary["experiment"] == "baseline", "mAP50_95"]
+    summary["delta_mAP50_95"] = summary["mAP50_95"] - (base.iloc[0] if len(base) else np.nan)
+    display(summary.style.format(precision=4))
+
+    metric_candidates = [c for c in ["mAP50_95", "mAP50", "AP_small"] if c in summary and summary[c].notna().any()]
+    lookup = summary.set_index("experiment")
+    effects = []
+    if set(order).issubset(set(lookup.index.astype(str))):
+        for metric in metric_candidates:
+            b, m, a, c = [float(lookup.loc[x, metric]) for x in order]
+            effects.append({"metric": metric, "P2 effect": m-b, "PSA effect": a-b,
+                            "combined effect": c-b, "interaction": c-m-a+b})
+    effects_df = pd.DataFrame(effects)
+    display(effects_df.style.format(precision=4))
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    sns.barplot(data=summary, x="experiment", y="mAP50_95", ax=axes[0])
+    if "AP_small" in summary: sns.barplot(data=summary, x="experiment", y="AP_small", ax=axes[1])
+    sns.barplot(data=summary, x="experiment", y="inference_ms", ax=axes[2])
+    axes[0].set_title("mAP50-95"); axes[1].set_title("COCO AP small"); axes[2].set_title("Inference ms/ảnh")
+    for ax in axes: ax.tick_params(axis="x", rotation=20)
+    plt.tight_layout(); plt.show()
+
+    best_experiment = str(summary.sort_values("mAP50_95", ascending=False).iloc[0]["experiment"])
+    best_row = next(r for r in run_manifest if r["experiment"] == best_experiment)
+    best_model = YOLO(best_row["weights"])
+
+    hard_pool = boxes.query("split == 'test' and (size_at_640 == 'small' or `class` == 'smoke')")["image"].drop_duplicates().tolist()
+    hard_samples = random.Random(SEEDS[0]).sample(hard_pool, min(9, len(hard_pool)))
+    predictions = best_model.predict(hard_samples, imgsz=IMGSZ, conf=0.25, iou=0.7, device=DEVICE, verbose=False)
+    fig, axes = plt.subplots(3, 3, figsize=(15, 15))
+    for ax, result in zip(axes.flat, predictions):
+        ax.imshow(result.plot()[:, :, ::-1]); ax.axis("off"); ax.set_title(Path(result.path).name)
+    for ax in axes.flat[len(predictions):]: ax.axis("off")
+    plt.suptitle(f"Best: {best_experiment}"); plt.tight_layout(); plt.show()
+
+    plot_names = ["confusion_matrix_normalized.png", "BoxPR_curve.png", "BoxF1_curve.png"]
+    plot_dir = val_dirs[(best_experiment, best_row["seed"])]
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    for ax, name in zip(axes, plot_names):
+        path = plot_dir / name
+        if path.exists(): ax.imshow(Image.open(path))
+        ax.axis("off"); ax.set_title(name)
+    plt.tight_layout(); plt.show()
+
+    SAVE_TO_DRIVE = False  # @param {type:"boolean"}
+    DOWNLOAD_ZIP = False  # @param {type:"boolean"}
+
+    # ===== XUẤT KẾT QUẢ RIÊNG CHO EXPERIMENT CỦA VERSION NÀY =====
+    current_experiment = EXPERIMENTS_TO_RUN[0]
+    REPORT_DIR = WORKDIR / "report" / current_experiment
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+    architecture_df[architecture_df["experiment"] == current_experiment].to_csv(
+        REPORT_DIR / "architecture.csv", index=False
+    )
+    manifest_df.to_csv(REPORT_DIR / "run_manifest.csv", index=False)
+    eval_df.to_csv(REPORT_DIR / "test_metrics.csv", index=False)
+    class_df.to_csv(REPORT_DIR / "per_class_metrics.csv", index=False)
+    summary.to_csv(REPORT_DIR / "ablation_summary.csv", index=False)
+    effects_df.to_csv(REPORT_DIR / "factorial_effects.csv", index=False)
+    if not size_df.empty:
+        size_df.to_csv(REPORT_DIR / "coco_size_metrics.csv", index=False)
+
+    current_row = run_manifest[0]
+    best_src = Path(current_row["weights"])
+    best_copy = REPORT_DIR / f"{current_experiment}_best.pt"
+    shutil.copy2(best_src, best_copy)
+
+    last_copy = None
+    last_src_text = current_row.get("last_weights", "")
+    if last_src_text:
+        last_src = Path(last_src_text)
+        if last_src.exists():
+            last_copy = REPORT_DIR / f"{current_experiment}_last.pt"
+            shutil.copy2(last_src, last_copy)
+
+    # Copy các đồ thị/CSV Ultralytics của test evaluation nếu có.
+    eval_output = val_dirs.get((current_experiment, current_row["seed"]))
+    if eval_output and Path(eval_output).exists():
+        eval_copy_dir = REPORT_DIR / "test_eval"
+        if eval_copy_dir.exists():
+            shutil.rmtree(eval_copy_dir)
+        shutil.copytree(eval_output, eval_copy_dir)
+
+    # ZIP chỉ chứa kết quả của experiment hiện tại.
+    archive_base = WORKDIR / f"{current_experiment}_{RUN_MODE}_results"
+    archive = shutil.make_archive(
+        str(archive_base), "zip",
+        root_dir=REPORT_DIR.parent,
+        base_dir=REPORT_DIR.name
+    )
+
+    print("\n" + "=" * 70)
+    print("EXPERIMENT ĐÃ HOÀN TẤT:", current_experiment)
+    print("Report:", REPORT_DIR)
+    print("Best checkpoint:", best_copy)
+    print("Last checkpoint:", last_copy if last_copy else "Không tìm thấy last.pt")
+    print("ZIP:", archive)
+    print("=" * 70)
+
+    if IN_COLAB and SAVE_TO_DRIVE:
+        from google.colab import drive
+        drive.mount("/content/drive")
+        target = Path("/content/drive/MyDrive/DFire_Buoi4")
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(archive, target / Path(archive).name)
+        shutil.copy2(best_copy, target / best_copy.name)
+        if last_copy:
+            shutil.copy2(last_copy, target / last_copy.name)
+
+    if IN_COLAB and DOWNLOAD_ZIP:
+        from google.colab import files
+        files.download(archive)
+
+
+try:
+    run_evaluation_and_final_export()
+except Exception as exc:
+    # Không làm Kaggle Version thất bại sau khi training đã hoàn tất.
+    # Checkpoint và training ZIP phía trên vẫn được giữ trong Output.
+    import traceback
+    error_file = SAFETY_DIR / "EVALUATION_ERROR.txt"
+    error_file.write_text(
+        "Training đã hoàn tất. Chỉ phần evaluation/report phía sau bị lỗi.\n\n"
+        + traceback.format_exc(),
+        encoding="utf-8",
+    )
+    # Cập nhật safety ZIP để kèm error log.
+    shutil.make_archive(
+        str(WORKDIR / f"{current_experiment}_{RUN_MODE}_TRAIN_COMPLETE"),
+        "zip",
+        root_dir=SAFETY_DIR.parent,
+        base_dir=SAFETY_DIR.name,
+    )
+    print("\n" + "!" * 70)
+    print("TRAINING VẪN ĐÃ ĐƯỢC GIỮ.")
+    print("Evaluation/report gặp lỗi:", repr(exc))
+    print("Chi tiết:", error_file)
+    print("Safety ZIP:", WORKDIR / f"{current_experiment}_{RUN_MODE}_TRAIN_COMPLETE.zip")
+    print("!" * 70)
