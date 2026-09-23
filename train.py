@@ -17,7 +17,7 @@ RUN_TRAIN = True  # @param {type:"boolean"}
 RUN_COCO_SIZE_EVAL = True  # @param {type:"boolean"}
 # Kaggle background: 1 Version = 1 experiment để mỗi phần hoàn tất sẽ được lưu thành Output riêng.
 # Đổi lần lượt: "baseline" -> "multiscale" -> "attention" -> "combined"
-KAGGLE_EXPERIMENT = "attention"  # @param ["baseline", "multiscale", "attention", "combined"]
+KAGGLE_EXPERIMENT = "combined"  # @param ["baseline", "multiscale", "attention", "combined"]
 EXPERIMENTS_TO_RUN = [KAGGLE_EXPERIMENT]
 SEEDS = [42]
 IMGSZ = 640
